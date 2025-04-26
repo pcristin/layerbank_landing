@@ -1,0 +1,11 @@
+{
+  "SCROLL": {
+    "chain_id": 534352,
+    "rpc_url": "https://rpc.ankr.com/scroll",
+    "explorer_url": "https://scrollscan.com/",
+    "core_address": "0xEC53c830f4444a8A56455c6836b5D2aA794289Aa",
+    "ltoken_address": "0x0D8F8e271DD3f2fC58e5716d3Ff7041dBe3F0688",
+    "usdc_address": "0x06eFdBFf2a14a7c8E15944D1F4A48F9F95F663A4",
+    "decimals": 18
+  }
+}

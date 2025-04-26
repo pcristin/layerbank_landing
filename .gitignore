@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+*.log
+*.sqlite3
+*.db
+*.pid
+*.bak
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+.Python
+*.pyenv
+
+# Environment files
+.env
+.env.*
+secrets.env
+
+# VSCode / PyCharm
+.vscode/
+.idea/
+
+# Mac / Windows
+.DS_Store
+Thumbs.db
+
+# Compiled Cython files
+*.so
+
+# Jupyter
+.ipynb_checkpoints
+
+# Test artifacts
+.coverage
+htmlcov/
+pytest_cache/
+.tox/
+
+# Project files
+logs/
+*.log
+cache/
+build/
+dist/
+layerbank/permit_former

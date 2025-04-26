@@ -1,0 +1,7 @@
+{
+  "proxy": "ENV:my_proxy",
+  "private_key": "ENV:my_wallet_key",
+  "token": "USDC",
+  "network": "SCROLL",
+  "amount": 1
+}
