@@ -202,137 +202,140 @@ class Client:
             raise RuntimeError(f"Невозможно найти имя юнита с децималами: {decimals}")
         return self.w3.from_wei(number, unit_name)
 
+    # Метод для построения транзакции
+    async def prepare_tx(self, value: Union[int, float] = 0) -> TxParams:
+        """Подготавливает базовую транзакцию."""
+        try:
+            nonce = await self.w3.eth.get_transaction_count(self.address)
+            chain_id = await self.w3.eth.chain_id
+            
+            tx_params = {
+                'from': self.address,
+                'nonce': nonce,
+                'chainId': chain_id,
+            }
+            
+            if value > 0:
+                tx_params['value'] = value
+                
+            # Добавляем параметры EIP-1559 если поддерживается
+            if self.eip_1559:
+                base_fee = await self.w3.eth.gas_price
+                max_priority_fee = int(base_fee * 0.1) or 1_000_000  # Минимальная чаевая
+                max_fee = int(base_fee * 1.5 + max_priority_fee)
+                
+                tx_params.update({
+                    'maxFeePerGas': max_fee,
+                    'maxPriorityFeePerGas': max_priority_fee
+                })
+            else:
+                tx_params['gasPrice'] = await self.w3.eth.gas_price
+                
+            return tx_params
+        except Exception as e:
+            logger.error(f"Ошибка при подготовке транзакции: {e}")
+            raise
+
+    # Метод для подписи и отправки транзакции
+    async def sign_and_send_tx(self, transaction: TxParams, without_gas: bool = False) -> str:
+        """Подписывает и отправляет транзакцию."""
+        try:
+            if not without_gas:
+                # Оцениваем газ, если не указан
+                if 'gas' not in transaction:
+                    try:
+                        tx_copy = dict(transaction)
+                        del tx_copy['gasPrice']  # Удаляем для совместимости с estimateGas
+                        gas_estimate = await self.w3.eth.estimate_gas(tx_copy)
+                        transaction['gas'] = int(gas_estimate * 1.2)  # Добавляем 20% запас
+                    except Exception as e:
+                        logger.warning(f"Не удалось оценить газ: {e}. Используем фиксированное значение.")
+                        transaction['gas'] = 300000  # Фолбек на фиксированный газ
+            
+            signed_tx = self.w3.eth.account.sign_transaction(transaction, self.private_key)
+            tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            return tx_hash.hex()
+        except Exception as e:
+            logger.error(f"Ошибка при подписи или отправке транзакции: {e}")
+            raise
+
+    # Метод для ожидания завершения транзакции
+    async def wait_tx(self, tx_hash: Union[str, HexBytes], explorer_url: Optional[str] = None) -> bool:
+        """
+        Ожидает завершения транзакции и возвращает статус успеха.
+        """
+        if isinstance(tx_hash, str):
+            tx_hash = HexBytes(tx_hash)
+        
+        if explorer_url and not explorer_url.endswith('/'):
+            explorer_url += '/'
+        
+        tx_url = f"{explorer_url}tx/{tx_hash.hex()}" if explorer_url else f"Хэш транзакции: {tx_hash.hex()}"
+        logger.info(f"⏳ Ожидание подтверждения транзакции: {tx_url}\n")
+        
+        max_attempts = 50
+        for attempt in range(max_attempts):
+            try:
+                receipt = await self.w3.eth.get_transaction_receipt(tx_hash)
+                if receipt is not None:
+                    if receipt['status'] == 1:
+                        logger.info(f"✅ Транзакция успешно подтверждена! Блок: {receipt['blockNumber']}\n")
+                        return True
+                    else:
+                        logger.error(f"❌ Транзакция не удалась. Подробности: {tx_url}\n")
+                        return False
+            except TransactionNotFound:
+                pass  # Транзакция еще не включена в блок
+            except Exception as e:
+                logger.error(f"Ошибка при проверке статуса транзакции: {e}")
+                # Продолжаем ожидание
+            
+            await asyncio.sleep(5)
+        
+        logger.warning(f"⚠️ Превышено время ожидания подтверждения транзакции: {tx_url}\n")
+        return False
+
+    # Метод для отправки approve-транзакции
+    async def approve_usdc(self, usdc_contract, spender, amount):
+        """Отправляет транзакцию для аппрува токена."""
+        try:
+            logger.info(f"🔑 Подготовка транзакции аппрува USDC на сумму {await self.from_wei_main(amount, self.usdc_address):.6f}")
+            
+            # Подготовка транзакции
+            tx_params = await self.prepare_tx()
+            tx = await usdc_contract.functions.approve(spender, amount).build_transaction(tx_params)
+            
+            # Подпись и отправка
+            tx_hash = await self.sign_and_send_tx(tx)
+            logger.info(f"📝 Транзакция аппрува отправлена: {tx_hash}")
+            
+            success = await self.wait_tx(tx_hash, self.explorer_url)
+            if success:
+                logger.info(f"✅ Транзакция аппрува успешно подтверждена!")
+                
+                # Проверяем, что аппрув действительно установлен
+                try:
+                    new_allowance = await self.get_allowance(self.usdc_address, self.address, spender)
+                    if new_allowance >= amount:
+                        logger.info(f"✅ Аппрув успешно установлен. Разрешено: {await self.from_wei_main(new_allowance, self.usdc_address):.6f}\n")
+                        return True
+                    else:
+                        logger.warning(f"⚠️ Аппрув подтвержден, но allowance меньше требуемого: {await self.from_wei_main(new_allowance, self.usdc_address):.6f} < {await self.from_wei_main(amount, self.usdc_address):.6f}\n")
+                        return False
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось проверить новый allowance: {e}\n")
+                    return True  # Предполагаем успех, так как транзакция прошла
+            else:
+                logger.error(f"❌ Не удалось выполнить аппрув USDC\n")
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка при выполнении аппрува: {e}")
+            raise
+
     # Метод для построения swap транзакции
     async def build_swap_tx(self, quote_data: dict) -> TxParams:
         """
-            Строим транзакцию для обмена токенов, используя котировку.
-            """
-        contract_address = quote_data['contractAddress']
-        amount_in = int(quote_data['srcQuoteTokenAmount'])
-        amount_out_min = int(quote_data['minReceiveAmount'])
-
-        # Строим транзакцию для обмена
-        contract = await self.get_contract(contract_address, ERC20_ABI)
-
-        tx_data = contract.encodeABI(
-            fn_name="swap",
-            args=[self.ltoken_address, self.core_address, amount_in, amount_out_min]
-        )
-
-        tx = await self.prepare_tx()
-        tx.update({
-            "to": contract_address,
-            "data": tx_data,
-            "value": 0  # Если необходимо, можно добавить нативные токены
-        })
-
-        return tx
-
-    # Approve
-    async def approve_usdc(self, usdc_contract, spender, amount):
-        owner = self.address
-        nonce = await self.w3.eth.get_transaction_count(owner)
-        chain_id = await self.w3.eth.chain_id
-
-        tx_params = {
-            'from': owner,
-            'nonce': nonce,
-            'gas': 300_000,
-            'chainId': chain_id
-        }
-
-        if self.eip_1559:
-            base_fee = await self.w3.eth.gas_price
-            max_priority_fee = int(base_fee * 0.1) or 1_000_000  # Минимальная чаевая
-            max_fee = int(base_fee * 1.5 + max_priority_fee)
-
-            tx_params.update({
-                'maxPriorityFeePerGas': max_priority_fee,
-                'maxFeePerGas': max_fee,
-                'type': '0x2'
-            })
-        else:
-            tx_params['gasPrice'] = int(await self.w3.eth.gas_price * 1.25)
-
-        # Формирование транзакции approve
-        tx = await usdc_contract.functions.approve(spender, amount).build_transaction(tx_params)
-
-        # Подпись и отправка
-        signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
-        tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash)
-
-        return receipt
-
-    # Подготовка транзакции
-    async def prepare_tx(self, value: Union[int, float] = 0) -> TxParams:
-        transaction: TxParams = {
-            "chainId": await self.w3.eth.chain_id,
-            "nonce": await self.w3.eth.get_transaction_count(self.address),
-            "from": self.address,
-            "value": value,
-        }
-
-        if self.eip_1559:
-            base_fee = await self.w3.eth.gas_price
-            max_priority_fee_per_gas = await self.w3.eth.max_priority_fee or base_fee
-            max_fee_per_gas = int(base_fee * 1.25 + max_priority_fee_per_gas)
-
-            transaction.update({
-                "maxPriorityFeePerGas": max_priority_fee_per_gas,
-                "maxFeePerGas": max_fee_per_gas,
-                "type": "0x2",
-            })
-        else:
-            transaction["gasPrice"] = int((await self.w3.eth.gas_price) * 1.25)
-
-        return transaction
-
-    # Подпись и отправка транзакции
-    async def sign_and_send_tx(self, transaction: TxParams, without_gas: bool = False):
-        try:
-            if not without_gas:
-                transaction["gas"] = int((await self.w3.eth.estimate_gas(transaction)) * 1.5)
-
-            signed = self.w3.eth.account.sign_transaction(transaction, self.private_key)
-            signed_raw_tx = signed.raw_transaction
-            logger.info("✅ Транзакция подписана\n")
-
-            tx_hash_bytes = await self.w3.eth.send_raw_transaction(signed_raw_tx)
-            tx_hash_hex = self.w3.to_hex(tx_hash_bytes)
-            logger.info("✅ Транзакция отправлена: %s\n", tx_hash_hex)
-
-            return tx_hash_hex
-        except Exception as e:
-            logger.error(f"❌ Ошибка при отправке транзакции: {e}")
-            return None
-
-    # Ожидание результата транзакции
-    async def wait_tx(self, tx_hash: Union[str, HexBytes], explorer_url: Optional[str] = None) -> bool:
-        total_time = 0
-        timeout = 120
-        poll_latency = 10
-
-        tx_hash_bytes = HexBytes(tx_hash)  # Приведение к HexBytes
-
-        while True:
-            try:
-                receipt = await self.w3.eth.get_transaction_receipt(tx_hash_bytes)
-                status = receipt.get("status")
-                if status == 1:
-                    logger.info(f"✅ Транзакция выполнена успешно: {explorer_url}/tx/{tx_hash_bytes.hex()}\n")
-                    return True
-                elif status is None:
-                    await asyncio.sleep(poll_latency)
-                else:
-                    logger.error(f"❌ Транзакция не выполнена: {explorer_url}/tx/{tx_hash_bytes.hex()}")
-                    return False
-            except TransactionNotFound:
-                if total_time > timeout:
-                    logger.warning(f"❌ Транзакция {tx_hash_bytes.hex()} не подтвердилась за 120 секунд")
-                    return False
-                total_time += poll_latency
-                await asyncio.sleep(poll_latency)
-            except Exception as e:
-                logger.error(f"❌ Ошибка при получении receipt: {e}")
-                return False
+        Строим транзакцию для обмена токенов, используя котировку.
+        """
+        raise NotImplementedError("Эта функция не используется в данном проекте")
